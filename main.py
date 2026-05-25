@@ -141,18 +141,16 @@ class EdgeIDS:
 
     def _classify_attack(self, result) -> str:
         """直接返回模型输出的攻击类型名称（多分类模型）"""
-        # 优先使用 DetectionResult 中的 attack_type_name
         if hasattr(result, 'attack_type_name') and result.attack_type_name:
             return result.attack_type_name
-        # 降级：使用 attack_type_id 查表
-        if hasattr(result, 'attack_type_id'):
-            from src.inference.detector import ATTACK_TYPE_NAMES
-            return ATTACK_TYPE_NAMES.get(result.attack_type_id, f'Unknown-{result.attack_type_id}')
+        # 降级：通过检测器的映射表查询
+        if hasattr(result, 'attack_type_id') and hasattr(self.detector, '_attack_type_names'):
+            return self.detector._attack_type_names.get(
+                result.attack_type_id, f'Unknown-{result.attack_type_id}')
         return 'Unknown'
 
     def _filter_false_positive(self, pkt, attack_type: str) -> bool:
         """规则过滤：模型误判正常流量为攻击时的降敏处理"""
-        # 对低置信度 + 已建立连接的情况，认为是误报
         if attack_type in ('Reconnaissance', 'Analysis'):
             ack = getattr(pkt, 'flow_ack_flags', 0)
             dpkts = getattr(pkt, 'flow_dpkts', 0)
@@ -162,13 +160,12 @@ class EdgeIDS:
 
     def _danger_level(self, result) -> str:
         """根据攻击类型返回危险等级（使用映射表，非置信度推测）"""
-        # 优先使用 DetectionResult 中的 danger_level
         if hasattr(result, 'danger_level') and result.danger_level:
             return result.danger_level
-        # 降级：使用 attack_type_id 查表
-        if hasattr(result, 'attack_type_id'):
-            from src.inference.detector import ATTACK_DANGER_LEVELS
-            return ATTACK_DANGER_LEVELS.get(result.attack_type_id, '未知')
+        # 降级：通过检测器的映射表查询
+        if hasattr(result, 'attack_type_id') and hasattr(self.detector, '_attack_danger_levels'):
+            return self.detector._attack_danger_levels.get(
+                result.attack_type_id, '未知')
         return '未知'
 
     def _update_dashboard(self):

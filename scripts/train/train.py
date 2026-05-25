@@ -127,14 +127,15 @@ def load_and_preprocess():
         label_encoders[col] = le
         logger.info(f"编码列 {col}: {len(le.classes_)} 类")
 
-    # attack_cat 编码（多分类标签 0-9）
-    all_attack_cats = pd.concat([train_df['attack_cat'], test_df['attack_cat']], axis=0).fillna('Normal').astype(str)
-    le_attack = LabelEncoder()
-    le_attack.fit(all_attack_cats)
-    y_train = le_attack.transform(train_df['attack_cat'].fillna('Normal').astype(str))
-    y_test = le_attack.transform(test_df['attack_cat'].fillna('Normal').astype(str))
-    label_encoders['attack_cat'] = le_attack
-    logger.info(f"attack_cat 编码: {len(le_attack.classes_)} 类 → {list(le_attack.classes_)}")
+    # attack_cat 编码（多分类标签 0-9，固定顺序确保 Normal=0）
+    CATEGORY_ORDER = ['Normal', 'Analysis', 'Backdoor', 'DoS', 'Exploits',
+                      'Fuzzers', 'Generic', 'Reconnaissance', 'Shellcode', 'Worms']
+    cat_to_id = {cat: i for i, cat in enumerate(CATEGORY_ORDER)}
+    y_train = train_df['attack_cat'].fillna('Normal').astype(str).map(cat_to_id).values
+    y_test = test_df['attack_cat'].fillna('Normal').astype(str).map(cat_to_id).values
+    # 保存类别顺序列表（不是 LabelEncoder）
+    label_encoders['attack_cat'] = CATEGORY_ORDER
+    logger.info(f"attack_cat 编码: {len(CATEGORY_ORDER)} 类 → {CATEGORY_ORDER}")
     logger.info(f"各类别样本数:\n{pd.Series(y_train).value_counts().sort_index().to_dict()}")
 
     # 最终48维特征列表
@@ -268,8 +269,8 @@ def train():
     logger.info(f"混淆矩阵:\n{cm}")
     per_class_acc = cm.diagonal() / cm.sum(axis=1)
     logger.info("各类别准确率:")
-    le_attack = label_encoders['attack_cat']
-    for i, name in enumerate(le_attack.classes_):
+    cat_order = label_encoders['attack_cat']
+    for i, name in enumerate(cat_order):
         logger.info(f"  {name}: {per_class_acc[i]:.4f}" if i < len(per_class_acc) else f"  {name}: N/A")
     logger.info(f"总体准确率: {best_acc:.4f}, 宏平均 F1: {best_f1:.4f}")
 

@@ -16,34 +16,18 @@ from ..utils.logger import LoggerMixin
 from ..utils.exceptions import ModelError, InferenceError
 from ..models.tcn_model import TCN
 
-# 攻击类型 ID → 名称映射（与训练端 LabelEncoder 一致）
-# 0: Normal, 1: Analysis, 2: Backdoor, 3: DoS, 4: Exploits,
-# 5: Fuzzers, 6: Generic, 7: Reconnaissance, 8: Shellcode, 9: Worms
-ATTACK_TYPE_NAMES: Dict[int, str] = {
-    0: 'Normal',
-    1: 'Analysis',
-    2: 'Backdoor',
-    3: 'DoS',
-    4: 'Exploits',
-    5: 'Fuzzers',
-    6: 'Generic',
-    7: 'Reconnaissance',
-    8: 'Shellcode',
-    9: 'Worms',
-}
-
-# 攻击类型 → 危险等级映射
-ATTACK_DANGER_LEVELS: Dict[int, str] = {
-    0: '无',         # Normal
-    1: '中危',       # Analysis
-    2: '严重',       # Backdoor
-    3: '严重',       # DoS
-    4: '严重',       # Exploits
-    5: '高危',       # Fuzzers
-    6: '高危',       # Generic
-    7: '中危',       # Reconnaissance
-    8: '严重',       # Shellcode
-    9: '严重',       # Worms
+# 攻击类型 → 危险等级（按类别名索引）
+_ATTACK_DANGER_MAP: Dict[str, str] = {
+    'Normal': '无',
+    'Analysis': '中危',
+    'Backdoor': '严重',
+    'DoS': '严重',
+    'Exploits': '严重',
+    'Fuzzers': '高危',
+    'Generic': '高危',
+    'Reconnaissance': '中危',
+    'Shellcode': '严重',
+    'Worms': '严重',
 }
 
 
@@ -121,11 +105,37 @@ class IDSDetector(LoggerMixin):
                 self.scaler.feature_names_in_ = None
             self.logger.info(f"已加载 Scaler: {scaler_path}")
 
-        # 加载 attack_cat LabelEncoder（训练时保存的）
+        # 加载 attack_cat 类别顺序列表（训练时保存的固定顺序，Normal=0）
         self._le_attack = None
+        self._attack_type_names: Dict[int, str] = {}
+        self._attack_danger_levels: Dict[int, str] = {}
+        self._normal_class_id = 0  # Normal 类别的 ID
+
         if le_attack_path and Path(le_attack_path).exists():
-            self._le_attack = joblib.load(le_attack_path)
-            self.logger.info(f"已加载 attack_cat LabelEncoder: {le_attack_path} ({len(self._le_attack.classes_)} 类)")
+            cat_order = joblib.load(le_attack_path)
+            # cat_order 可能是 list（固定顺序）或 LabelEncoder（旧版兼容）
+            if isinstance(cat_order, list):
+                classes = cat_order
+            elif hasattr(cat_order, 'classes_'):
+                classes = list(cat_order.classes_)
+            else:
+                classes = []
+            self._le_attack = classes
+            # 动态构建映射表
+            for i, name in enumerate(classes):
+                self._attack_type_names[i] = name
+                self._attack_danger_levels[i] = _ATTACK_DANGER_MAP.get(name, '未知')
+                if name.lower() == 'normal':
+                    self._normal_class_id = i
+            self.logger.info(f"已加载 attack_cat 映射: {len(classes)} 类, Normal ID={self._normal_class_id}")
+        else:
+            # 降级：使用内置默认映射
+            _default_order = ['Normal', 'Analysis', 'Backdoor', 'DoS', 'Exploits',
+                            'Fuzzers', 'Generic', 'Reconnaissance', 'Shellcode', 'Worms']
+            for i, name in enumerate(_default_order):
+                self._attack_type_names[i] = name
+                self._attack_danger_levels[i] = _ATTACK_DANGER_MAP.get(name, '未知')
+            self._normal_class_id = 0
 
         # 序列缓冲区
         self._feature_buffer: deque = deque(maxlen=sequence_length)
@@ -203,18 +213,20 @@ class IDSDetector(LoggerMixin):
             pred_class = int(np.argmax(probs))
             confidence = float(probs[pred_class])
 
-            # 攻击概率 = 所有非 Normal 类（id != 0）的 softmax 之和
-            attack_prob = float(np.sum(probs[1:])) if len(probs) > 1 else 0.0
+            # 攻击概率 = 所有非 Normal 类的 softmax 之和
+            mask = np.ones(len(probs), dtype=bool)
+            mask[self._normal_class_id] = False
+            attack_prob = float(np.sum(probs[mask])) if len(probs) > 1 else 0.0
 
-            # 攻击类型信息
+            # 攻击类型信息（动态映射，与训练端类别顺序一致）
             attack_type_id = pred_class
-            attack_type_name = ATTACK_TYPE_NAMES.get(pred_class, f'Unknown-{pred_class}')
-            danger_level = ATTACK_DANGER_LEVELS.get(pred_class, '未知')
+            attack_type_name = self._attack_type_names.get(pred_class, f'Unknown-{pred_class}')
+            danger_level = self._attack_danger_levels.get(pred_class, '未知')
 
             latency_ms = (time.time() - start) * 1000
             self._inference_times.append(latency_ms)
             self._detection_count += 1
-            if pred_class != 0:
+            if pred_class != self._normal_class_id:
                 self._attack_count += 1
 
             return DetectionResult(
