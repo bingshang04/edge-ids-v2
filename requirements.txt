@@ -1,0 +1,24 @@
+# Edge-IDS v2.0 核心依赖
+numpy>=1.21.0
+pandas>=1.3.0
+scikit-learn>=1.0.0
+scapy>=2.4.5
+flask>=2.0.0
+flask-cors>=3.0.0
+pyyaml>=5.4.0
+psutil>=5.8.0
+joblib>=1.0.0
+torch>=2.0.0
+
+# 模型转换（PC 端训练 + 导出用）
+onnx>=1.14.0
+onnxruntime>=1.16.0
+tensorflow>=2.14.0       # 仅 PC 端用于模型转换，不部署到树莓派
+
+# TFLite 运行时（树莓派5 ARM64 部署用）
+# 树莓派上单独安装: pip install tflite-runtime>=2.14.0
+# PC 端开发/测试不需要此行
+
+# 模型转换工具（按需安装其中一种）
+# onnx2tf>=1.15.0    # 方案 A: ONNX → TFLite 一步到位（推荐）
+# onnx-tf>=1.10.0    # 方案 B: ONNX → TF SavedModel → TFLite

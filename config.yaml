@@ -1,0 +1,55 @@
+# Edge-IDS v2.0 配置文件（ECA-TCN）
+# 根据运行环境修改以下配置
+
+# 系统
+system:
+  name: "Edge-IDS-v2"
+  version: "2.0.0"
+
+# 数据包捕获
+capture:
+  interface: "auto"
+  bpf_filter: "ip"
+  buffer_size: 65536
+  promiscuous: true
+  queue_size: 10000
+
+# 特征提取（48维）
+features:
+  flow_timeout: 120.0
+  max_flows: 10000
+  feature_dim: 48
+  packet_history_size: 1000
+  iat_history_size: 100
+
+# ECA-TCN 模型（多分类: 1 正常 + 9 攻击 = 10 类）
+model:
+  input_dim: 48
+  num_classes: 10
+  num_channels: [128, 256, 256]
+  kernel_size: 5
+  dropout: 0.3
+  use_eca: true
+  model_path: "data/models/tcn_model_3.0.pth"
+
+# 推理
+inference:
+  confidence_threshold: 0.5
+  alert_threshold: 0.8
+  sequence_length: 10
+  batch_size: 64
+  buffer_size: 100
+  scaler_path: "data/models/unsw_scaler3.0.joblib"
+
+# Web 仪表盘
+web:
+  host: "0.0.0.0"
+  port: 8080
+  debug: false
+
+# 日志
+logging:
+  level: "INFO"
+  log_dir: "logs"
+  max_bytes: 10485760
+  backup_count: 5

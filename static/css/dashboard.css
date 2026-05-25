@@ -1,0 +1,89 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+.container { max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
+
+/* 头部 */
+header { text-align: center; margin-bottom: 1.5rem; }
+header h1 { font-size: 2rem; color: #38bdf8; margin-bottom: 0.2rem; }
+header p { color: #94a3b8; font-size: 0.9rem; }
+.header-row { display: flex; justify-content: center; align-items: center; gap: 1rem; margin-top: 0.5rem; }
+
+.badge { display: inline-block; padding: 0.25rem 1rem; border-radius: 1rem; font-size: 0.85rem; font-weight: 600; }
+.badge.running { background: #065f46; color: #6ee7b7; animation: pulse 2s infinite; }
+.badge.stopped { background: #7f1d1d; color: #fca5a5; }
+
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+
+.alert-flash { background: #dc2626; color: #fff; padding: 0.3rem 1rem; border-radius: 0.5rem; font-weight: 700; font-size: 0.9rem; animation: flash 0.5s ease-in-out; }
+.alert-flash.hidden { display: none; }
+
+@keyframes flash { 0% { transform: scale(0.8); opacity: 0; } 50% { transform: scale(1.1); } 100% { transform: scale(1); opacity: 1; } }
+
+/* 卡片网格 */
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+.card { background: #1e293b; border: 1px solid #334155; border-radius: 0.75rem; padding: 1.1rem; }
+.card h3 { font-size: 0.85rem; color: #38bdf8; margin-bottom: 0.6rem; text-transform: uppercase; letter-spacing: 0.05em; }
+
+.stat { display: flex; justify-content: space-between; padding: 0.3rem 0; font-size: 0.88rem; border-bottom: 1px solid #1e293b; }
+.stat span:first-child { color: #94a3b8; }
+.stat span:last-child { font-weight: 600; color: #f1f5f9; }
+.num-attack { color: #f87171 !important; }
+
+/* 危险等级 */
+.danger-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0; font-size: 0.88rem; }
+.danger-row span:last-child { font-weight: 700; font-size: 1.1rem; margin-left: auto; }
+
+.tag { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 0.35rem; font-size: 0.78rem; font-weight: 600; min-width: 3rem; text-align: center; }
+.tag.severe { background: #7f1d1d; color: #fca5a5; }
+.tag.high { background: #7c2d12; color: #fdba74; }
+.tag.medium { background: #713f12; color: #fde047; }
+.tag.low { background: #14532d; color: #86efac; }
+
+/* 控制按钮 */
+.controls { text-align: center; margin-bottom: 1.5rem; }
+.btn { padding: 0.6rem 2rem; border: none; border-radius: 0.5rem; font-size: 1rem; font-weight: 600; cursor: pointer; margin: 0 0.5rem; transition: opacity 0.2s, transform 0.1s; }
+.btn:hover { opacity: 0.85; }
+.btn:active { transform: scale(0.97); }
+.btn-start { background: #059669; color: white; }
+.btn-stop { background: #dc2626; color: white; }
+
+/* Section */
+.section { margin-bottom: 1.5rem; }
+.section h2 { font-size: 1.1rem; color: #38bdf8; margin-bottom: 0.6rem; }
+.count-badge { background: #dc2626; color: #fff; border-radius: 1rem; padding: 0.1rem 0.55rem; font-size: 0.75rem; font-weight: 700; vertical-align: middle; margin-left: 0.3rem; }
+
+/* 攻击类型统计 */
+.type-stats { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+.type-chip { background: #1e293b; border: 1px solid #334155; border-radius: 0.5rem; padding: 0.4rem 0.8rem; font-size: 0.85rem; display: flex; align-items: center; gap: 0.4rem; }
+.type-chip .t-name { color: #94a3b8; }
+.type-chip .t-count { font-weight: 700; color: #f87171; }
+
+/* 攻击记录表格 */
+.table-wrapper { background: #1e293b; border: 1px solid #334155; border-radius: 0.75rem; overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+thead th { background: #0f172a; color: #94a3b8; padding: 0.6rem 0.8rem; text-align: left; font-weight: 600; position: sticky; top: 0; white-space: nowrap; }
+tbody td { padding: 0.5rem 0.8rem; border-bottom: 1px solid #1e293b; white-space: nowrap; }
+tbody tr:hover { background: #263348; }
+tbody tr.new-row { animation: highlight 1.5s ease-out; }
+@keyframes highlight { 0% { background: #3b1f1f; } 100% { background: transparent; } }
+
+.empty-row td { text-align: center; color: #64748b; padding: 2rem; }
+
+.conf-high { color: #f87171; font-weight: 700; }
+.conf-mid { color: #fdba74; }
+.conf-low { color: #86efac; }
+
+/* 曲线图 */
+.chart-section { background: #1e293b; border: 1px solid #334155; border-radius: 0.75rem; padding: 1.2rem; }
+.chart-section h2 { margin-bottom: 0.75rem; }
+
+.chart-controls { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 0.75rem; }
+
+.cb-label { display: flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; color: #cbd5e1; cursor: pointer; user-select: none; }
+.cb-label input[type=checkbox] { accent-color: #38bdf8; width: 0.9rem; height: 0.9rem; cursor: pointer; }
+.cb-dot, .cb-dot-cpu, .cb-dot-mem { display: inline-block; width: 0.65rem; height: 0.65rem; border-radius: 50%; }
+.cb-label.cb-system .cb-dot-cpu { margin-right: -0.25rem; }
+.cb-label.cb-system .cb-dot-mem { }
+
+.chart-wrapper { position: relative; width: 100%; max-height: 320px; }
+.chart-wrapper canvas { width: 100% !important; }

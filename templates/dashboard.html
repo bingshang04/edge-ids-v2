@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Edge-IDS v2.0 — 边缘入侵检测系统</title>
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=4">
+</head>
+<body>
+    <div class="container">
+        <!-- 头部 -->
+        <header>
+            <h1>Edge-IDS v2.0</h1>
+            <p>基于 ECA-TCN 的边缘入侵检测系统</p>
+            <div class="header-row">
+                <span id="status-badge" class="badge stopped">已停止</span>
+                <span id="alert-flash" class="alert-flash hidden">⚠ 检测到攻击!</span>
+            </div>
+        </header>
+
+        <!-- 统计卡片 -->
+        <div class="grid">
+            <div class="card">
+                <h3>数据包统计</h3>
+                <div class="stat"><span>已捕获</span> <span id="packets-captured">0</span></div>
+                <div class="stat"><span>已丢弃</span> <span id="packets-dropped">0</span></div>
+                <div class="stat"><span>活跃流</span> <span id="flows-active">0</span></div>
+                <div class="stat"><span>已分析流</span> <span id="flows-analyzed">0</span></div>
+            </div>
+
+            <div class="card">
+                <h3>检测统计</h3>
+                <div class="stat"><span>本次检测</span> <span id="attacks-detected" class="num">0</span></div>
+                <div class="stat"><span>累计攻击</span> <span id="attacks-total" class="num-attack">0</span></div>
+                <div class="stat"><span>平均延迟</span> <span id="avg-latency">0 ms</span></div>
+            </div>
+
+            <div class="card">
+                <h3>系统信息</h3>
+                <div class="stat"><span>平台</span> <span id="sys-platform">-</span></div>
+                <div class="stat"><span>内存</span> <span id="sys-memory">-</span></div>
+                <div class="stat"><span>CPU</span> <span id="sys-cpu">-</span></div>
+                <div class="stat"><span>运行时长</span> <span id="uptime">-</span></div>
+            </div>
+
+            <div class="card">
+                <h3>危险等级分布</h3>
+                <div id="danger-stats">
+                    <div class="danger-row"><span class="tag severe">严重</span> <span id="d-severe">0</span></div>
+                    <div class="danger-row"><span class="tag high">高危</span> <span id="d-high">0</span></div>
+                    <div class="danger-row"><span class="tag medium">中危</span> <span id="d-medium">0</span></div>
+                    <div class="danger-row"><span class="tag low">低危</span> <span id="d-low">0</span></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 控制按钮 -->
+        <div class="controls">
+            <button onclick="control('start')" class="btn btn-start">开始检测</button>
+            <button onclick="control('stop')" class="btn btn-stop">停止检测</button>
+        </div>
+
+        <!-- 实时趋势曲线图 -->
+        <div class="section chart-section">
+            <h2>实时趋势</h2>
+            <div class="chart-controls">
+                <label class="cb-label cb-traffic"><input type="checkbox" checked onchange="toggleChart('traffic', this)"><span class="cb-dot" style="background:#38bdf8"></span> 流量</label>
+                <label class="cb-label cb-latency"><input type="checkbox" checked onchange="toggleChart('latency', this)"><span class="cb-dot" style="background:#fbbf24"></span> 检测延迟</label>
+                <label class="cb-label cb-attacks"><input type="checkbox" checked onchange="toggleChart('attacks', this)"><span class="cb-dot" style="background:#f87171"></span> 攻击频率</label>
+                <label class="cb-label cb-system"><input type="checkbox" onchange="toggleChart('system', this)"><span class="cb-dot-cpu" style="background:#a78bfa"></span><span class="cb-dot-mem" style="background:#34d399"></span> 系统负载</label>
+            </div>
+            <div class="chart-wrapper">
+                <canvas id="timelineChart"></canvas>
+            </div>
+        </div>
+
+        <!-- 攻击类型统计 -->
+        <div class="section" id="type-stats-section" style="display:none">
+            <h2>攻击类型统计</h2>
+            <div id="type-stats" class="type-stats"></div>
+        </div>
+
+        <!-- 攻击记录表格 -->
+        <div class="section">
+            <h2>攻击记录 <span id="log-count" class="count-badge">0</span></h2>
+            <div class="table-wrapper">
+                <table id="attack-table">
+                    <thead>
+                        <tr>
+                            <th>时间</th>
+                            <th>来源</th>
+                            <th>目标</th>
+                            <th>协议</th>
+                            <th>攻击类型</th>
+                            <th>置信度</th>
+                            <th>危险等级</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr class="empty-row"><td colspan="7">暂无攻击记录</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/chart.min.js"></script>
+    <script src="/static/js/dashboard.js?v=5"></script>
+    <script>initDashboard();</script>
+</body>
+</html>

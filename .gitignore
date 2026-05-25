@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+
+# 日志
+logs/
+
+# 原始数据集（太大，可从 Kaggle 重新下载）
+data/raw/
+
+# conda / 虚拟环境
+edge/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude 内部
+.claude/
+
+# 环境变量
+.env
+.env.local
