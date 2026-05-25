@@ -54,6 +54,11 @@ class InferenceConfig:
     batch_size: int = 64
     buffer_size: int = 100
     scaler_path: Optional[str] = None
+    # TFLite 推理配置
+    use_tflite: bool = False
+    tflite_model_path: Optional[str] = None
+    tflite_num_threads: int = 4
+    quantization: str = 'FP32'  # FP32 | INT8
 
 
 @dataclass
@@ -143,6 +148,10 @@ class Settings:
             self.model.num_channels = [defaults['hidden_dim']] * defaults['num_layers']
         self.model.kernel_size = defaults['kernel_size']
         self.model.dropout = defaults['dropout']
+        # TFLite 相关配置
+        for key in ('use_tflite', 'tflite_model_path', 'tflite_num_threads', 'quantization'):
+            if key in defaults:
+                setattr(self.inference, key, defaults[key])
 
     def _apply_yaml_config(self, config_data: Dict[str, Any]):
         for section, config_obj in [

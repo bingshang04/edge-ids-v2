@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Edge-IDS v2.0 — 边缘入侵检测系统</title>
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=4">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=5">
 </head>
 <body>
     <div class="container">
@@ -77,7 +77,9 @@
         <!-- 攻击类型统计 -->
         <div class="section" id="type-stats-section" style="display:none">
             <h2>攻击类型统计</h2>
-            <div id="type-stats" class="type-stats"></div>
+            <div class="pie-chart-container">
+                <canvas id="attackTypeChart"></canvas>
+            </div>
         </div>
 
         <!-- 攻击记录表格 -->
@@ -105,7 +107,7 @@
     </div>
 
     <script src="/static/js/chart.min.js"></script>
-    <script src="/static/js/dashboard.js?v=5"></script>
+    <script src="/static/js/dashboard.js?v=6"></script>
     <script>initDashboard();</script>
 </body>
 </html>

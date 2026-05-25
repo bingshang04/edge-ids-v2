@@ -22,7 +22,8 @@ from src.utils.platform_info import (
 )
 from src.capture.packet_capture import PacketCapture, create_packet_capture
 from src.features.flow_features import FeatureExtractor, create_feature_extractor
-from src.inference.detector import IDSDetector, create_detector
+from src.inference import create_detector
+from src.blocker import IPTablesBlocker, create_blocker
 
 # Web 模块（可选）
 try:
@@ -43,7 +44,8 @@ class EdgeIDS:
 
         self.capture: Optional[PacketCapture] = None
         self.extractor: Optional[FeatureExtractor] = None
-        self.detector: Optional[IDSDetector] = None
+        self.detector: Optional[object] = None       # IDSDetector | TFLiteDetector
+        self.blocker: Optional[IPTablesBlocker] = None  # iptables 阻断器
         self.dashboard: Optional[object] = None
 
         self._is_running = False
@@ -83,7 +85,12 @@ class EdgeIDS:
         self.logger.info(f"特征提取器就绪 → {self.config.feature.feature_dim}维")
 
         self.detector = create_detector(self.config)
-        self.logger.info(f"检测器就绪 → {'ECA-TCN' if self.config.model.use_eca else 'TCN'}")
+        self.logger.info(f"检测器就绪 → {'TFLite' if getattr(self.config.inference, 'use_tflite', False) else 'ECA-TCN/PyTorch'}")
+
+        # 初始化阻断器（Windows 下自动 dry_run 模式）
+        self.blocker = create_blocker(self.config)
+        blocker_mode = 'DRY_RUN' if self.blocker.dry_run else 'ACTIVE'
+        self.logger.info(f"阻断器就绪 → iptables 模式: {blocker_mode}")
 
         return self
 
@@ -105,6 +112,18 @@ class EdgeIDS:
                         self._stats['packets_processed'] += 1
                         return
 
+                    # 阻断决策（评估是否封锁源 IP）
+                    block_decision = self.blocker.evaluate(
+                        src_ip=packet_info.src_ip,
+                        confidence=result.confidence,
+                        attack_type=attack_type,
+                    )
+                    if block_decision.is_blocked():
+                        self.logger.warning(
+                            f"🛡 阻断决策: {block_decision.action} | "
+                            f"IP: {block_decision.src_ip} | {block_decision.reason}"
+                        )
+
                     self._stats['attacks_detected'] += 1
                     self._stats['total_attacks'] += 1
 
@@ -121,6 +140,7 @@ class EdgeIDS:
                         'confidence': round(result.confidence, 4),
                         'danger': danger,
                         'latency_ms': round(result.latency_ms, 2),
+                        'block_action': block_decision.action,
                     }
                     self._attack_log.appendleft(record)  # 最新的在前面
 
@@ -131,7 +151,8 @@ class EdgeIDS:
                     self.logger.warning(
                         f"⚠ 检测到攻击[{attack_type}] | 危险等级: {danger} | "
                         f"来源: {record['src']} → {record['dst']} | "
-                        f"置信度: {result.confidence:.4f}"
+                        f"置信度: {result.confidence:.4f} | "
+                        f"阻断: {block_decision.action}"
                     )
 
                 self._update_dashboard()

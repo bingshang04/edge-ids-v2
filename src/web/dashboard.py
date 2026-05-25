@@ -62,6 +62,9 @@ class DashboardServer(LoggerMixin):
         self._ts_buffer: deque = deque(maxlen=120)  # 时序数据（2分钟）
         self._ts_lock = threading.Lock()
         self._last_packets_captured = 0  # 用于差值计算
+        # 增量统计计数器
+        self._attack_type_counts: Dict[str, int] = {}
+        self._attack_danger_counts: Dict[str, int] = {'严重': 0, '高危': 0, '中危': 0, '低危': 0}
         self._register_routes()
 
     def _register_routes(self):
@@ -128,20 +131,12 @@ class DashboardServer(LoggerMixin):
             limit = request.args.get('limit', 50, type=int)
             with self._attack_log_lock:
                 attacks = list(self._attack_log)[:limit]
-            # 统计
-            with self._attack_log_lock:
-                all_attacks = list(self._attack_log)
-            type_counts = {}
-            danger_counts = {'严重': 0, '高危': 0, '中危': 0, '低危': 0}
-            for a in all_attacks:
-                t = a.get('type', '未知')
-                type_counts[t] = type_counts.get(t, 0) + 1
-                d = a.get('danger', '低危')
-                if d in danger_counts:
-                    danger_counts[d] += 1
+                total = len(self._attack_log)
+                type_counts = dict(self._attack_type_counts)
+                danger_counts = dict(self._attack_danger_counts)
             return jsonify({
                 'attacks': attacks,
-                'total': len(all_attacks),
+                'total': total,
                 'type_counts': type_counts,
                 'danger_counts': danger_counts,
             })
@@ -150,9 +145,33 @@ class DashboardServer(LoggerMixin):
         self._callbacks[name] = callback
 
     def add_attack(self, record: dict):
-        """添加攻击记录"""
+        """添加攻击记录（增量更新统计计数器）"""
         with self._attack_log_lock:
+            # 环形队列满时，淘汰最旧记录（最右端）并递减计数器
+            if len(self._attack_log) == self._attack_log.maxlen:
+                evicted = self._attack_log.pop()
+                evicted_type = evicted.get('type', '未知')
+                if evicted_type in self._attack_type_counts:
+                    self._attack_type_counts[evicted_type] = max(
+                        0, self._attack_type_counts[evicted_type] - 1
+                    )
+                evicted_danger = evicted.get('danger', '低危')
+                if evicted_danger in self._attack_danger_counts:
+                    self._attack_danger_counts[evicted_danger] = max(
+                        0, self._attack_danger_counts[evicted_danger] - 1
+                    )
+
+            # 新记录插入队首
             self._attack_log.appendleft(record)
+
+            # 增量更新计数器
+            attack_type = record.get('type', '未知')
+            self._attack_type_counts[attack_type] = (
+                self._attack_type_counts.get(attack_type, 0) + 1
+            )
+            danger = record.get('danger', '低危')
+            if danger in self._attack_danger_counts:
+                self._attack_danger_counts[danger] += 1
 
     def update_status(self, **kwargs):
         with self._status_lock:

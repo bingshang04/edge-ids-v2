@@ -7,11 +7,11 @@ import joblib
 import numpy as np
 import torch
 import torch.nn as nn
-from dataclasses import dataclass
 from collections import deque
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 
+from .result import DetectionResult  # 共享数据模型（无框架依赖）
 from ..utils.logger import LoggerMixin
 from ..utils.exceptions import ModelError, InferenceError
 from ..models.tcn_model import TCN
@@ -29,35 +29,6 @@ _ATTACK_DANGER_MAP: Dict[str, str] = {
     'Shellcode': '严重',
     'Worms': '严重',
 }
-
-
-@dataclass
-class DetectionResult:
-    """多分类检测结果"""
-    prediction: int          # 类别 ID (0-9)
-    confidence: float        # 预测置信度（softmax 最大值）
-    probability: float       # 攻击概率（所有非 Normal 类的 softmax 和）
-    latency_ms: float
-    timestamp: float
-    attack_type_id: int = 0            # 攻击类型 ID
-    attack_type_name: str = 'Normal'   # 攻击类型名称
-    danger_level: str = '无'           # 危险等级
-
-    def is_attack(self, threshold: float = 0.5) -> bool:
-        return self.prediction != 0 and self.confidence >= threshold
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'prediction': self.prediction,
-            'confidence': round(self.confidence, 4),
-            'probability': round(self.probability, 4),
-            'latency_ms': round(self.latency_ms, 2),
-            'timestamp': self.timestamp,
-            'is_attack': self.is_attack(),
-            'attack_type_id': self.attack_type_id,
-            'attack_type_name': self.attack_type_name,
-            'danger_level': self.danger_level,
-        }
 
 
 class IDSDetector(LoggerMixin):

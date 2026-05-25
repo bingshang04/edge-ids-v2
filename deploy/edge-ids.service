@@ -1,0 +1,45 @@
+[Unit]
+Description=Edge-IDS v2.0 边缘入侵检测系统
+Documentation=https://github.com/edge-ids/edge-ids-v2
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/edge-ids
+Environment="PATH=/opt/edge-ids/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+
+# 激活 conda 环境并启动
+ExecStartPre=/bin/sleep 5
+ExecStart=/bin/bash -c 'source /home/pi/miniconda3/etc/profile.d/conda.sh && conda activate edge && python main.py --mode full'
+ExecStop=/bin/kill -TERM $MAINPID
+ExecReload=/bin/kill -HUP $MAINPID
+
+# 自动重启策略
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+# 资源限制（树莓派5 4GB RAM）
+MemoryMax=3500M
+CPUQuota=300%
+LimitNOFILE=65536
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=edge-ids
+
+# 安全加固
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/edge-ids/logs /opt/edge-ids/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
