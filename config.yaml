@@ -22,15 +22,17 @@ features:
   packet_history_size: 1000
   iat_history_size: 100
 
-# ECA-TCN 模型（多分类: 1 正常 + 9 攻击 = 10 类）
+# ECA-TCN 模型（两步级联: Model_A 二分类 + Model_B 九分类）
 model:
   input_dim: 48
-  num_classes: 10
+  num_classes: 9
   num_channels: [128, 256, 256]
   kernel_size: 5
   dropout: 0.3
   use_eca: true
   model_path: "data/models/tcn_model_3.0.pth"
+  model_a_path: "data/models/tcn_model_binary.pth"
+  model_b_path: "data/models/tcn_model_9class.pth"
 
 # 推理
 inference:

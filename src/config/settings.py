@@ -23,6 +23,11 @@ class ModelConfig:
     dropout: float = 0.3
     use_eca: bool = True
     model_path: str = DEFAULT_MODEL_PATH
+    # 两步级联模型路径
+    model_a_path: str = 'data/models/tcn_model_binary.pth'
+    model_b_path: str = 'data/models/tcn_model_9class.pth'
+    model_a_channels: list = field(default_factory=lambda: [64, 128])
+    model_b_channels: list = field(default_factory=lambda: [128, 256])
 
 
 @dataclass
@@ -57,6 +62,8 @@ class InferenceConfig:
     # TFLite 推理配置
     use_tflite: bool = False
     tflite_model_path: Optional[str] = None
+    tflite_model_a_path: Optional[str] = None
+    tflite_model_b_path: Optional[str] = None
     tflite_num_threads: int = 4
     quantization: str = 'FP32'  # FP32 | INT8
 

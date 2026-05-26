@@ -1,9 +1,7 @@
 """
-Edge-IDS v2.0 统一训练脚本（ECA-TCN + UNSW-NB15 多分类）
-训练完成后自动保存模型、Scaler 和 LabelEncoder
-
-多分类: 1 正常 + 9 攻击 = 10 类
-攻击类别: Normal, Analysis, Backdoor, DoS, Exploits, Fuzzers, Generic, Reconnaissance, Shellcode, Worms
+Edge-IDS v2.0 两步级联训练脚本（ECA-TCN）
+Model_A: 二分类 [64,128] Normal vs Attack
+Model_B: 九分类 [128,256] 8种攻击子类识别
 """
 import os
 import sys
@@ -16,8 +14,8 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 import joblib
@@ -39,75 +37,31 @@ TEST_PATH = os.path.join(DATA_DIR, 'UNSW_NB15_testing-set.csv')
 
 SEQUENCE_LENGTH = 10
 BATCH_SIZE = 64
-NUM_EPOCHS = 5
-LEARNING_RATE = 0.0005
+NUM_EPOCHS = 30
+LEARNING_RATE = 0.001
 WEIGHT_DECAY = 5e-5
+EARLY_STOP_PATIENCE = 8
 
-# ECA-TCN 模型参数
-NUM_CLASSES = 10        # 多分类: 1 Normal + 9 Attack
-NUM_CHANNELS = [128, 256, 256]
 KERNEL_SIZE = 5
 DROPOUT = 0.3
 USE_ECA = True
 
-
-# ====================== Focal Loss（处理类别不平衡）======================
-class FocalLoss(nn.Module):
-    """
-    Focal Loss for multi-class classification.
-
-    对难分类样本和少数类样本加权，解决 UNSW-NB15 的严重类别不平衡问题。
-    gamma=2 时，pt=0.9 的易分类样本权重降低 100x。
-    """
-
-    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
-        """
-        Args:
-            alpha: 各类别权重 tensor，shape (num_classes,)，或 None
-            gamma: 聚焦参数，越大越关注难分类样本
-            reduction: 'mean' 或 'sum'
-        """
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, inputs, targets):
-        """
-        Args:
-            inputs: (batch, num_classes) — 模型 logits
-            targets: (batch,) — 类别标签
-        """
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
-        pt = torch.exp(-ce_loss)  # 每个样本的 pt
-        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
-
-        if self.alpha is not None:
-            if self.alpha.device != inputs.device:
-                self.alpha = self.alpha.to(inputs.device)
-            alpha_t = self.alpha[targets]
-            focal_loss = alpha_t * focal_loss
-
-        if self.reduction == 'mean':
-            return focal_loss.mean()
-        elif self.reduction == 'sum':
-            return focal_loss.sum()
-        return focal_loss
+# 9 类（DoS + Exploits 合并）
+CATEGORY_ORDER = ['Normal', 'Analysis', 'Backdoor', 'DoS_Exploits', 'Fuzzers',
+                  'Generic', 'Reconnaissance', 'Shellcode', 'Worms']
 
 
-# ====================== 数据加载与特征工程 ======================
-def load_and_preprocess():
-    """加载 UNSW-NB15 数据 + 48维特征工程 + 多分类标签编码 + 保存预处理器"""
+# ====================== 公用数据加载 ======================
+def _load_raw_data():
+    """加载原始 CSV 并完成特征工程/标准化，返回 X_train/X_test 和原始 DataFrame"""
     logger.info("加载数据...")
     train_df = pd.read_csv(TRAIN_PATH)
     test_df = pd.read_csv(TEST_PATH)
     logger.info(f"训练集: {train_df.shape}, 测试集: {test_df.shape}")
 
-    # 基础数值特征（按 CSV 列自然顺序，排除非数值列）
     numeric_cols = [col for col in train_df.columns
                     if col not in ['id', 'proto', 'service', 'state', 'attack_cat', 'label']]
 
-    # 衍生特征
     for df in [train_df, test_df]:
         df['byte_ratio'] = df['sbytes'] / (df['dbytes'] + 1e-6)
         df['load_ratio'] = df['sload'] / (df['dload'] + 1e-6)
@@ -116,7 +70,6 @@ def load_and_preprocess():
         df['ttl_diff'] = df['sttl'] - df['dttl']
         df['avg_pkt_size'] = (df['sbytes'] + df['dbytes']) / (df['spkts'] + df['dpkts'] + 1e-6)
 
-    # 类别特征编码
     cat_cols = ['proto', 'service', 'state']
     label_encoders = {}
     for col in cat_cols:
@@ -128,122 +81,83 @@ def load_and_preprocess():
         label_encoders[col] = le
         logger.info(f"编码列 {col}: {len(le.classes_)} 类")
 
-    # attack_cat 编码（多分类标签 0-9，固定顺序确保 Normal=0）
-    CATEGORY_ORDER = ['Normal', 'Analysis', 'Backdoor', 'DoS', 'Exploits',
-                      'Fuzzers', 'Generic', 'Reconnaissance', 'Shellcode', 'Worms']
-    cat_to_id = {cat: i for i, cat in enumerate(CATEGORY_ORDER)}
-    y_train = train_df['attack_cat'].fillna('Normal').astype(str).map(cat_to_id).values
-    y_test = test_df['attack_cat'].fillna('Normal').astype(str).map(cat_to_id).values
-    # 保存类别顺序列表（不是 LabelEncoder）
-    label_encoders['attack_cat'] = CATEGORY_ORDER
-    logger.info(f"attack_cat 编码: {len(CATEGORY_ORDER)} 类 → {CATEGORY_ORDER}")
-    logger.info(f"各类别样本数:\n{pd.Series(y_train).value_counts().sort_index().to_dict()}")
-
-    # 最终48维特征列表
     feature_cols = numeric_cols + ['byte_ratio', 'load_ratio', 'pkt_ratio',
                                    'dur_rate', 'ttl_diff', 'avg_pkt_size'] + cat_cols
     logger.info(f"特征维度: {len(feature_cols)}")
 
-    # 缺失值处理
     train_df[feature_cols] = train_df[feature_cols].fillna(0)
     test_df[feature_cols] = test_df[feature_cols].fillna(0)
 
-    # 标准化
     scaler = StandardScaler()
     X_train = scaler.fit_transform(train_df[feature_cols])
     X_test = scaler.transform(test_df[feature_cols])
 
-    total_train = len(y_train)
-    normal_count = (y_train == 0).sum()
-    attack_count = total_train - normal_count
-    logger.info(f"正常样本: {normal_count} ({normal_count / total_train:.2%}), "
-                f"攻击样本: {attack_count} ({attack_count / total_train:.2%})")
+    # 9 类标签映射（DoS + Exploits 合并为 DoS_Exploits）
+    cat_to_id = {cat: i for i, cat in enumerate(CATEGORY_ORDER)}
+    cat_to_id['DoS'] = cat_to_id['DoS_Exploits']
+    cat_to_id['Exploits'] = cat_to_id['DoS_Exploits']
 
-    # SMOTE 过采样少数类
-    logger.info(f"\nSMOTE 前各类别样本数:\n{pd.Series(y_train).value_counts().sort_index().to_dict()}")
+    y_train_9class = train_df['attack_cat'].fillna('Normal').astype(str).map(cat_to_id).values
+    y_test_9class = test_df['attack_cat'].fillna('Normal').astype(str).map(cat_to_id).values
 
-    # 第1轮: Worms(class=9) 只有130样本，k_neighbors=1
-    smote_worms = SMOTE(sampling_strategy={9: 5000}, k_neighbors=1, random_state=42)
-    X_train, y_train = smote_worms.fit_resample(X_train, y_train)
-    logger.info(f"SMOTE 第1轮 (Worms→5000, k=1): 训练集 {X_train.shape[0]} 样本")
+    # 二分类标签（Normal=0, Attack=1）
+    y_train_binary = (y_train_9class != 0).astype(int)
+    y_test_binary = (y_test_9class != 0).astype(int)
 
-    # 第2轮: Analysis(1), Backdoor(2), Shellcode(8) → 5000
-    smote_others = SMOTE(sampling_strategy={1: 5000, 2: 5000, 8: 5000}, random_state=42)
-    X_train, y_train = smote_others.fit_resample(X_train, y_train)
-    logger.info(f"SMOTE 第2轮 (Analysis/Backdoor/Shellcode→5000): 训练集 {X_train.shape[0]} 样本")
+    label_encoders['attack_cat'] = CATEGORY_ORDER
+    logger.info(f"attack_cat 编码: {len(CATEGORY_ORDER)} 类 → {CATEGORY_ORDER}")
+    logger.info(f"9分类样本分布:\n{pd.Series(y_train_9class).value_counts().sort_index().to_dict()}")
+    logger.info(f"二分类样本: Normal={int((y_train_binary==0).sum())}, Attack={int((y_train_binary==1).sum())}")
 
-    logger.info(f"SMOTE 后各类别样本数:\n{pd.Series(y_train).value_counts().sort_index().to_dict()}\n")
-
-    return X_train, X_test, y_train, y_test, len(feature_cols), scaler, label_encoders
+    return (X_train, X_test, y_train_binary, y_test_binary,
+            y_train_9class, y_test_9class, len(feature_cols), scaler, label_encoders)
 
 
-def create_sequences(X, y, seq_length):
-    """滑动窗口创建时序序列"""
-    X_seq, y_seq = [], []
-    for i in range(len(X) - seq_length + 1):
-        X_seq.append(X[i:i + seq_length])
-        y_seq.append(y[i + seq_length - 1])
-    return np.array(X_seq), np.array(y_seq)
+def _apply_smote_9class(X_train, y_train_9class):
+    """对九分类训练集做 SMOTE（Worms k=3→2000, Backdoor→5000, Shellcode→5000, Analysis 不做）"""
+    logger.info(f"\nSMOTE 前各类别样本数:\n{pd.Series(y_train_9class).value_counts().sort_index().to_dict()}")
+
+    # Worms (ID=8): k=3, 目标 2000
+    try:
+        worms_count = int((y_train_9class == 8).sum())
+        k = min(3, worms_count - 1) if worms_count > 1 else 1
+        smote_worms = SMOTE(sampling_strategy={8: 2000}, k_neighbors=k, random_state=42)
+        X_train, y_train_9class = smote_worms.fit_resample(X_train, y_train_9class)
+        logger.info(f"SMOTE Worms→2000 (k={k}): {X_train.shape[0]} 样本")
+    except Exception as e:
+        logger.warning(f"SMOTE Worms 失败: {e}")
+
+    # Backdoor (ID=2): → 5000
+    try:
+        smote_backdoor = SMOTE(sampling_strategy={2: 5000}, random_state=42)
+        X_train, y_train_9class = smote_backdoor.fit_resample(X_train, y_train_9class)
+        logger.info(f"SMOTE Backdoor→5000: {X_train.shape[0]} 样本")
+    except Exception as e:
+        logger.warning(f"SMOTE Backdoor 失败: {e}")
+
+    # Shellcode (ID=7): → 5000
+    try:
+        smote_shellcode = SMOTE(sampling_strategy={7: 5000}, random_state=42)
+        X_train, y_train_9class = smote_shellcode.fit_resample(X_train, y_train_9class)
+        logger.info(f"SMOTE Shellcode→5000: {X_train.shape[0]} 样本")
+    except Exception as e:
+        logger.warning(f"SMOTE Shellcode 失败: {e}")
+
+    # Analysis (ID=1) 不做 SMOTE（模仿正常流量，合成会混淆边界）
+    logger.info(f"Analysis(ID=1) 不做 SMOTE（模仿正常流量特征，避免混淆 Normal 边界）")
+
+    logger.info(f"SMOTE 后各类别样本数:\n{pd.Series(y_train_9class).value_counts().sort_index().to_dict()}\n")
+    return X_train, y_train_9class
 
 
-# ====================== 训练 ======================
-def train():
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    logger.info(f"设备: {device}")
+# ====================== 公用训练引擎 ======================
+def _run_training_loop(model, train_loader, test_loader, criterion, optimizer,
+                       scheduler, device, model_name, model_save_path):
+    """统一训练循环：CosineAnnealing + EarlyStopping"""
+    best_f1, best_acc = 0.0, 0.0
+    patience_counter = 0
+    all_preds, all_labels = [], []
 
-    # 加载数据
-    X_train, X_test, y_train, y_test, input_dim, scaler, label_encoders = load_and_preprocess()
-
-    # 时序序列
-    X_train_seq, y_train_seq = create_sequences(X_train, y_train, SEQUENCE_LENGTH)
-    X_test_seq, y_test_seq = create_sequences(X_test, y_test, SEQUENCE_LENGTH)
-    logger.info(f"训练序列: {X_train_seq.shape}, 测试序列: {X_test_seq.shape}")
-
-    # DataLoader
-    train_loader = DataLoader(
-        TensorDataset(torch.FloatTensor(X_train_seq), torch.LongTensor(y_train_seq)),
-        batch_size=BATCH_SIZE, shuffle=True
-    )
-    test_loader = DataLoader(
-        TensorDataset(torch.FloatTensor(X_test_seq), torch.LongTensor(y_test_seq)),
-        batch_size=BATCH_SIZE
-    )
-
-    # ECA-TCN 模型（多分类）
-    model = TCN(
-        input_dim=input_dim,
-        num_classes=NUM_CLASSES,
-        num_channels=NUM_CHANNELS,
-        kernel_size=KERNEL_SIZE,
-        dropout=DROPOUT,
-        use_eca=USE_ECA,
-    ).to(device)
-    logger.info(f"ECA-TCN 参数量: {model.num_params / 1e6:.2f}M")
-    logger.info(f"模型信息: {model.get_model_info()}")
-
-    # Focal Loss + 类别权重（对少数攻击类额外加权）
-    # 类别: 0=Normal,1=Analysis,2=Backdoor,3=DoS,4=Exploits,5=Fuzzers,6=Generic,7=Reconnaissance,8=Shellcode,9=Worms
-    # 对 Worms(9), Shellcode(8), Backdoor(2), Analysis(1) 额外加权 3-5x
-    class_weights = np.ones(NUM_CLASSES)
-    # SMOTE 后调整权重（已过采样到5000，用温和权重避免过拟合合成样本）
-    class_weights[1] = 1.2   # Analysis（SMOTE 到 5000）
-    class_weights[2] = 1.5   # Backdoor（SMOTE 到 5000）
-    class_weights[3] = 3.0   # DoS（3x，与 Exploits 特征相似易混淆）
-    class_weights[4] = 1.5   # Exploits
-    class_weights[5] = 1.5   # Fuzzers
-    class_weights[6] = 1.5   # Generic
-    class_weights[7] = 1.2   # Reconnaissance
-    class_weights[8] = 1.5   # Shellcode（SMOTE 到 5000）
-    class_weights[9] = 1.5   # Worms（SMOTE 到 5000, k=1 合成质量有限）
-    # Normal 保持 1.0
-
-    alpha = torch.FloatTensor(class_weights).to(device)
-    criterion = FocalLoss(alpha=alpha, gamma=2.0)
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-
-    # 训练循环
-    best_acc, best_f1 = 0.0, 0.0
     for epoch in range(NUM_EPOCHS):
         model.train()
         train_loss = 0.0
@@ -255,42 +169,147 @@ def train():
             optimizer.step()
             train_loss += loss.item()
 
+        scheduler.step()
+
         # 验证
         model.eval()
-        all_preds, all_labels = [], []
+        epoch_preds, epoch_labels = [], []
         with torch.no_grad():
             for batch_x, batch_y in test_loader:
                 outputs = model(batch_x.to(device))
                 preds = torch.argmax(outputs, dim=1).cpu().numpy()
-                all_preds.extend(preds)
-                all_labels.extend(batch_y.numpy())
+                epoch_preds.extend(preds)
+                epoch_labels.extend(batch_y.numpy())
 
-        acc = accuracy_score(all_labels, all_preds)
-        prec = precision_score(all_labels, all_preds, average='macro', zero_division=0)
-        rec = recall_score(all_labels, all_preds, average='macro', zero_division=0)
-        f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+        acc = accuracy_score(epoch_labels, epoch_preds)
+        f1 = f1_score(epoch_labels, epoch_preds, average='macro', zero_division=0)
+        lr = scheduler.get_last_lr()[0]
 
-        logger.info(f"Epoch {epoch + 1:2d}/{NUM_EPOCHS} | Loss: {train_loss / len(train_loader):.4f} | "
-                    f"Acc: {acc:.4f} | P_macro: {prec:.4f} | R_macro: {rec:.4f} | F1_macro: {f1:.4f}")
+        logger.info(f"[{model_name}] Epoch {epoch + 1:2d}/{NUM_EPOCHS} | Loss: {train_loss / len(train_loader):.4f} | "
+                    f"Acc: {acc:.4f} | F1_macro: {f1:.4f} | LR: {lr:.2e}")
 
-        if f1 > best_f1 or (f1 == best_f1 and acc > best_acc):
-            best_acc, best_f1 = acc, f1
+        # 最佳模型保存
+        if f1 > best_f1:
+            best_f1, best_acc = f1, acc
+            patience_counter = 0
             os.makedirs(MODEL_DIR, exist_ok=True)
-            torch.save(model.state_dict(), os.path.join(MODEL_DIR, 'tcn_model_3.0.pth'))
-            logger.info(f"  → 保存最佳模型 (Acc: {acc:.4f}, F1_macro: {f1:.4f})")
+            torch.save(model.state_dict(), model_save_path)
+            logger.info(f"  → 保存最佳模型 → {model_save_path}")
+            all_preds, all_labels = epoch_preds, epoch_labels
+        else:
+            patience_counter += 1
+            if patience_counter >= EARLY_STOP_PATIENCE:
+                logger.info(f"  → EarlyStopping (patience={EARLY_STOP_PATIENCE})")
+                break
 
     # 最终评估
-    logger.info("\n最终评估:")
+    if not all_preds:
+        all_preds, all_labels = epoch_preds, epoch_labels
     cm = confusion_matrix(all_labels, all_preds)
+    logger.info(f"\n[{model_name}] 最佳模型评估:")
     logger.info(f"混淆矩阵:\n{cm}")
     per_class_acc = cm.diagonal() / cm.sum(axis=1)
-    logger.info("各类别准确率:")
-    cat_order = label_encoders['attack_cat']
-    for i, name in enumerate(cat_order):
-        logger.info(f"  {name}: {per_class_acc[i]:.4f}" if i < len(per_class_acc) else f"  {name}: N/A")
+    logger.info(f"各类别准确率: {dict(enumerate(per_class_acc.round(4)))}")
     logger.info(f"总体准确率: {best_acc:.4f}, 宏平均 F1: {best_f1:.4f}")
 
-    # 保存预处理器
+    return best_acc, best_f1
+
+
+# ====================== 训练入口 ======================
+def train_binary(X_train, X_test, y_train_binary, y_test_binary, input_dim, device):
+    """Model_A: 二分类 Normal vs Attack，轻量 [64,128]"""
+    logger.info(f"\n{'='*50}")
+    logger.info(f"Model_A: 二分类训练 (Normal vs Attack)")
+    logger.info(f"{'='*50}")
+
+    X_train_seq, y_train_seq = create_sequences(X_train, y_train_binary, SEQUENCE_LENGTH)
+    X_test_seq, y_test_seq = create_sequences(X_test, y_test_binary, SEQUENCE_LENGTH)
+    logger.info(f"训练序列: {X_train_seq.shape}, 测试序列: {X_test_seq.shape}")
+
+    train_loader = DataLoader(
+        TensorDataset(torch.FloatTensor(X_train_seq), torch.LongTensor(y_train_seq)),
+        batch_size=BATCH_SIZE, shuffle=True
+    )
+    test_loader = DataLoader(
+        TensorDataset(torch.FloatTensor(X_test_seq), torch.LongTensor(y_test_seq)),
+        batch_size=BATCH_SIZE
+    )
+
+    model = TCN(input_dim=input_dim, num_classes=2, num_channels=[64, 128],
+                kernel_size=KERNEL_SIZE, dropout=DROPOUT, use_eca=USE_ECA).to(device)
+    logger.info(f"参数量: {model.num_params / 1e6:.2f}M, channels=[64,128]")
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    scheduler = CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
+
+    save_path = os.path.join(MODEL_DIR, 'tcn_model_binary.pth')
+    return _run_training_loop(model, train_loader, test_loader, criterion, optimizer,
+                              scheduler, device, 'Model_A', save_path)
+
+
+def train_9class(X_train, X_test, y_train_9class, y_test_9class, input_dim, device):
+    """Model_B: 九分类攻击子类识别，[128,256]，Label Smoothing CE"""
+    logger.info(f"\n{'='*50}")
+    logger.info(f"Model_B: 九分类训练 ({' / '.join(CATEGORY_ORDER[1:])})")
+    logger.info(f"{'='*50}")
+
+    # SMOTE 仅对攻击样本（排除 Normal 由数据工程师控制）
+    X_train_smote, y_train_smote = _apply_smote_9class(X_train, y_train_9class)
+
+    X_train_seq, y_train_seq = create_sequences(X_train_smote, y_train_smote, SEQUENCE_LENGTH)
+    X_test_seq, y_test_seq = create_sequences(X_test, y_test_9class, SEQUENCE_LENGTH)
+    logger.info(f"训练序列 (SMOTE后): {X_train_seq.shape}, 测试序列: {X_test_seq.shape}")
+
+    train_loader = DataLoader(
+        TensorDataset(torch.FloatTensor(X_train_seq), torch.LongTensor(y_train_seq)),
+        batch_size=BATCH_SIZE, shuffle=True
+    )
+    test_loader = DataLoader(
+        TensorDataset(torch.FloatTensor(X_test_seq), torch.LongTensor(y_test_seq)),
+        batch_size=BATCH_SIZE
+    )
+
+    model = TCN(input_dim=input_dim, num_classes=len(CATEGORY_ORDER),
+                num_channels=[128, 256], kernel_size=KERNEL_SIZE,
+                dropout=DROPOUT, use_eca=USE_ECA).to(device)
+    logger.info(f"参数量: {model.num_params / 1e6:.2f}M, channels=[128,256]")
+
+    # Label Smoothing CE（替代 FocalLoss）
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    scheduler = CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
+
+    save_path = os.path.join(MODEL_DIR, 'tcn_model_9class.pth')
+    return _run_training_loop(model, train_loader, test_loader, criterion, optimizer,
+                              scheduler, device, 'Model_B', save_path)
+
+
+def create_sequences(X, y, seq_length):
+    """滑动窗口创建时序序列"""
+    X_seq, y_seq = [], []
+    for i in range(len(X) - seq_length + 1):
+        X_seq.append(X[i:i + seq_length])
+        y_seq.append(y[i + seq_length - 1])
+    return np.array(X_seq), np.array(y_seq)
+
+
+# ====================== 主入口 ======================
+if __name__ == "__main__":
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    logger.info(f"设备: {device} | Epochs: {NUM_EPOCHS} | Batch: {BATCH_SIZE}")
+
+    # 一次性加载数据，拆分标签
+    (X_train, X_test, y_train_binary, y_test_binary,
+     y_train_9class, y_test_9class, input_dim, scaler, label_encoders) = _load_raw_data()
+
+    # Step 1: 二分类
+    train_binary(X_train, X_test, y_train_binary, y_test_binary, input_dim, device)
+
+    # Step 2: 九分类
+    train_9class(X_train, X_test, y_train_9class, y_test_9class, input_dim, device)
+
+    # 保存预处理器（两个模型共享同一套）
     os.makedirs(MODEL_DIR, exist_ok=True)
     joblib.dump(scaler, os.path.join(MODEL_DIR, 'unsw_scaler3.0.joblib'))
     logger.info(f"Scaler 已保存 → {MODEL_DIR}/unsw_scaler3.0.joblib")
@@ -298,8 +317,4 @@ def train():
         joblib.dump(le, os.path.join(MODEL_DIR, f'le_{col}.joblib'))
         logger.info(f"LabelEncoder({col}) 已保存")
 
-    logger.info("\n训练完成！")
-
-
-if __name__ == "__main__":
-    train()
+    logger.info("\n全部训练完成！")

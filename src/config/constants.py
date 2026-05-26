@@ -28,6 +28,8 @@ PLATFORM_DEFAULTS: Dict[str, Dict[str, Any]] = {
         'num_channels': [64, 128],
         'use_tflite': True,
         'tflite_model_path': 'data/models/tcn_model.tflite',
+        'tflite_model_a_path': 'data/models/tcn_model_binary.tflite',
+        'tflite_model_b_path': 'data/models/tcn_model_9class.tflite',
         'tflite_num_threads': 4,
         'quantization': 'INT8',
         'max_memory_mb': 2048,
