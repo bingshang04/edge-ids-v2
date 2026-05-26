@@ -22,6 +22,7 @@ from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 import joblib
 import logging
+from imblearn.over_sampling import SMOTE
 
 from src.models.tcn_model import TCN
 
@@ -38,7 +39,7 @@ TEST_PATH = os.path.join(DATA_DIR, 'UNSW_NB15_testing-set.csv')
 
 SEQUENCE_LENGTH = 10
 BATCH_SIZE = 64
-NUM_EPOCHS = 10
+NUM_EPOCHS = 5
 LEARNING_RATE = 0.0005
 WEIGHT_DECAY = 5e-5
 
@@ -158,6 +159,21 @@ def load_and_preprocess():
     logger.info(f"正常样本: {normal_count} ({normal_count / total_train:.2%}), "
                 f"攻击样本: {attack_count} ({attack_count / total_train:.2%})")
 
+    # SMOTE 过采样少数类
+    logger.info(f"\nSMOTE 前各类别样本数:\n{pd.Series(y_train).value_counts().sort_index().to_dict()}")
+
+    # 第1轮: Worms(class=9) 只有130样本，k_neighbors=1
+    smote_worms = SMOTE(sampling_strategy={9: 5000}, k_neighbors=1, random_state=42)
+    X_train, y_train = smote_worms.fit_resample(X_train, y_train)
+    logger.info(f"SMOTE 第1轮 (Worms→5000, k=1): 训练集 {X_train.shape[0]} 样本")
+
+    # 第2轮: Analysis(1), Backdoor(2), Shellcode(8) → 5000
+    smote_others = SMOTE(sampling_strategy={1: 5000, 2: 5000, 8: 5000}, random_state=42)
+    X_train, y_train = smote_others.fit_resample(X_train, y_train)
+    logger.info(f"SMOTE 第2轮 (Analysis/Backdoor/Shellcode→5000): 训练集 {X_train.shape[0]} 样本")
+
+    logger.info(f"SMOTE 后各类别样本数:\n{pd.Series(y_train).value_counts().sort_index().to_dict()}\n")
+
     return X_train, X_test, y_train, y_test, len(feature_cols), scaler, label_encoders
 
 
@@ -209,16 +225,16 @@ def train():
     # 类别: 0=Normal,1=Analysis,2=Backdoor,3=DoS,4=Exploits,5=Fuzzers,6=Generic,7=Reconnaissance,8=Shellcode,9=Worms
     # 对 Worms(9), Shellcode(8), Backdoor(2), Analysis(1) 额外加权 3-5x
     class_weights = np.ones(NUM_CLASSES)
-    # 根据 UNSW-NB15 的严重不平衡，给稀有攻击类加权重
-    rare_attack_classes = {1: 4.0, 2: 4.0, 8: 5.0, 9: 5.0}  # Analysis, Backdoor, Shellcode, Worms
-    for cls_idx, weight_mult in rare_attack_classes.items():
-        class_weights[cls_idx] *= weight_mult
-    # 一般攻击类
-    class_weights[3] = 2.0   # DoS
-    class_weights[4] = 2.0   # Exploits
-    class_weights[5] = 2.5   # Fuzzers
-    class_weights[6] = 2.5   # Generic
-    class_weights[7] = 1.5   # Reconnaissance
+    # SMOTE 后调整权重（已过采样到5000，用温和权重避免过拟合合成样本）
+    class_weights[1] = 1.2   # Analysis（SMOTE 到 5000）
+    class_weights[2] = 1.5   # Backdoor（SMOTE 到 5000）
+    class_weights[3] = 3.0   # DoS（3x，与 Exploits 特征相似易混淆）
+    class_weights[4] = 1.5   # Exploits
+    class_weights[5] = 1.5   # Fuzzers
+    class_weights[6] = 1.5   # Generic
+    class_weights[7] = 1.2   # Reconnaissance
+    class_weights[8] = 1.5   # Shellcode（SMOTE 到 5000）
+    class_weights[9] = 1.5   # Worms（SMOTE 到 5000, k=1 合成质量有限）
     # Normal 保持 1.0
 
     alpha = torch.FloatTensor(class_weights).to(device)
