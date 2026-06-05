@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.idea/
+
+# 数据文件 (太大)
+data/processed/*.npy
+data/raw/
+
+# 模型检查点 (太大)
+checkpoints/*.pt
+checkpoints/**/*.pt
+
+# 结果
+checkpoints/results.json
+
+# Conda
+edge/

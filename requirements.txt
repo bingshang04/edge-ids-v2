@@ -1,0 +1,19 @@
+torch>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+pandas>=2.0.0
+
+# 边缘部署
+tensorflow>=2.15.0  # TFLite 转换
+# onnxruntime  # 可选: pip install onnxruntime
+
+# 数据抓包 (树莓派5)
+# scapy  # pip install scapy
+
+# 可视化
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Web 仪表盘
+flask>=3.0.0
+flask-socketio>=5.3.0
