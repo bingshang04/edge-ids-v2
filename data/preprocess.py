@@ -55,8 +55,13 @@ NUMERIC_COLS = [
 ]
 
 
-def load_csv_data(data_dir: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """加载训练集和测试集 CSV"""
+def load_csv_data(data_dir: str, swap: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """加载训练集和测试集 CSV
+
+    Args:
+        data_dir: 原始数据目录
+        swap: 是否交换训练/测试文件 (Kaggle下载的文件名与实际内容相反)
+    """
     data_path = Path(data_dir)
     train_files = list(data_path.glob("*training*.csv"))
     test_files = list(data_path.glob("*testing*.csv"))
@@ -75,15 +80,23 @@ def load_csv_data(data_dir: str) -> tuple[pd.DataFrame, pd.DataFrame]:
             f"或使用 Kaggle 命令: kagglehub.dataset_download('mrwellsdavid/unsw-nb15')"
         )
 
+    # Kaggle下载的文件名与实际内容相反:
+    #   UNSW_NB15_training-set.csv → 82K 记录 (实际是测试集)
+    #   UNSW_NB15_testing-set.csv  → 175K 记录 (实际是训练集)
     train_path = str(train_files[0])
     test_path = str(test_files[0]) if test_files else None
 
-    print(f"📂 加载训练集: {train_path}")
+    if swap and test_path:
+        # 交换：名称为 training 的文件当测试集，名称为 testing 的文件当训练集
+        train_path, test_path = test_path, train_path
+        print(f"⚠️  检测到文件名与内容颠倒，已自动交换加载顺序")
+
+    print(f"📂 加载训练集: {Path(train_path).name}")
     train_df = pd.read_csv(train_path)
     print(f"   训练集: {train_df.shape}")
 
     if test_path:
-        print(f"📂 加载测试集: {test_path}")
+        print(f"📂 加载测试集: {Path(test_path).name}")
         test_df = pd.read_csv(test_path)
         print(f"   测试集: {test_df.shape}")
     else:
