@@ -323,12 +323,12 @@ def train_binary(
         batch_size=BATCH_SIZE,
     )
 
-    # 模型 (轻量配置)
+    # 模型 (升级容量: DS-TCN 参数少，需更多通道匹配标准卷积的容量)
     model = DSTCNIDS(
         input_dim=input_dim,
         num_classes=2,
-        tcn_channels=[64, 128],
-        dilations=[1, 2],
+        tcn_channels=[128, 256, 256],
+        dilations=[1, 2, 4],
         kernel_size=5,
         dropout=0.3,
         use_se_threshold=True,
