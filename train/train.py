@@ -153,7 +153,7 @@ def run_training(
     patience: int = EARLY_STOP_PATIENCE,
     use_amp: bool = True,
 ):
-    """统一训练循环：CosineAnnealing + EarlyStopping + 混合精度"""
+    """统一训练循环：CosineAnnealing + EarlyStopping + 混合精度 + tqdm进度条"""
     best_f1 = 0.0
     best_acc = 0.0
     patience_counter = 0
@@ -161,19 +161,25 @@ def run_training(
     scaler = torch.amp.GradScaler("cuda") if use_amp and device.type == "cuda" else None
     history = {"train": [], "val": []}
 
+    params, size_mb = model.get_model_size()
     print(f"\n{'='*70}")
     print(f"  {model_name} 训练启动")
     print(f"{'='*70}")
-    params, size_mb = model.get_model_size()
     print(f"  参数: {params:,} | 体积: {size_mb:.2f}MB | 设备: {device}")
     print(f"  Epochs: {epochs} | Batch: {BATCH_SIZE} | LR: {LEARNING_RATE}")
     print(f"{'='*70}\n")
 
-    for epoch in range(epochs):
+    # 总进度条
+    epoch_pbar = tqdm(range(epochs), desc=f"🚀 {model_name}", unit="epoch",
+                      ncols=120, bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} "
+                      "[{elapsed}<{remaining}, {rate_fmt}] {postfix}")
+
+    for epoch in epoch_pbar:
         # --- 训练 ---
         model.train()
         train_loss = 0.0
         train_preds, train_labels = [], []
+        start_time = time.time()
 
         for batch_x, batch_y in train_loader:
             batch_x = batch_x.to(device, non_blocking=True)
@@ -221,6 +227,8 @@ def run_training(
                 val_preds.extend(outputs.argmax(dim=1).cpu().numpy())
                 val_labels.extend(batch_y.cpu().numpy())
 
+        epoch_time = time.time() - start_time
+
         # 指标
         train_acc = accuracy_score(train_labels, train_preds)
         train_f1 = f1_score(train_labels, train_preds, average="macro", zero_division=0)
@@ -228,18 +236,9 @@ def run_training(
         val_f1 = f1_score(val_labels, val_preds, average="macro", zero_division=0)
         lr = scheduler.get_last_lr()[0]
 
-        # 日志
-        tqdm.write(
-            f"  [{model_name}] Epoch {epoch+1:2d}/{epochs} | "
-            f"Loss: {train_loss/len(train_loader):.4f} | "
-            f"Train Acc: {train_acc:.4f} F1: {train_f1:.4f} | "
-            f"Val Acc: {val_acc:.4f} F1: {val_f1:.4f} | "
-            f"LR: {lr:.2e}"
-            f"{' ✅' if val_f1 > best_f1 else ''}"
-        )
-
         # 最佳模型
-        if val_f1 > best_f1:
+        improved = val_f1 > best_f1
+        if improved:
             best_f1, best_acc = val_f1, val_acc
             patience_counter = 0
             all_best_preds, all_best_labels = val_preds, val_labels
@@ -250,16 +249,43 @@ def run_training(
                 "best_f1": best_f1,
                 "best_acc": best_acc,
             }, save_path)
-            tqdm.write(f"    → 保存最佳模型 → {save_path}")
         else:
             patience_counter += 1
-            if patience_counter >= patience:
-                tqdm.write(f"    → EarlyStopping (patience={patience})")
-                break
+
+        # 更新进度条
+        epoch_pbar.set_postfix({
+            "LR": f"{lr:.2e}",
+            "T_Loss": f"{train_loss/len(train_loader):.3f}",
+            "V_Loss": f"{val_loss/len(val_loader):.3f}",
+            "T_F1": f"{train_f1:.3f}",
+            "V_F1": f"{val_f1:.3f}",
+            "Best": f"{best_f1:.4f}{' *' if improved else ''}",
+        })
+
+        # 每5个epoch或最佳时详细打印
+        if (epoch + 1) % 5 == 0 or improved:
+            tqdm.write(
+                f"  [{model_name}] Epoch {epoch+1:2d}/{epochs} | Time: {epoch_time:.1f}s | "
+                f"Train F1: {train_f1:.4f} | Val F1: {val_f1:.4f} | LR: {lr:.2e}"
+                f"{' ✅' if improved else ''}"
+            )
 
         # 记录历史
-        history["train"].append({"acc": train_acc, "f1": train_f1, "loss": train_loss / len(train_loader)})
-        history["val"].append({"acc": val_acc, "f1": val_f1, "loss": val_loss / len(val_loader)})
+        history["train"].append({
+            "acc": train_acc, "f1": train_f1,
+            "loss": train_loss / len(train_loader),
+        })
+        history["val"].append({
+            "acc": val_acc, "f1": val_f1,
+            "loss": val_loss / len(val_loader),
+        })
+
+        # 早停
+        if patience_counter >= patience:
+            tqdm.write(f"  ⏹ 早停触发 (patience={patience})")
+            break
+
+    epoch_pbar.close()
 
     # 最终评估
     print(f"\n[{model_name}] 最佳模型评估:")
@@ -467,6 +493,13 @@ def main():
         X_test = np.load(test_data_path)
         y_test_10class = np.load(data_path / "y_test_10class.npy")
         y_test_binary = np.load(data_path / "y_test_binary.npy")
+
+        # 验证数据来源 (测试集应 ~82K 条记录，非 175K)
+        n_test_records = X_test.shape[0]
+        print(f"  测试记录: {n_test_records:,} 条")
+        if n_test_records > 100000:
+            print(f"  ⚠️ 警告: 测试集过大 ({n_test_records:,})，可能是训练数据!")
+            print(f"  请重新运行: python data/preprocess.py")
 
         # 创建测试序列
         X_test_seq, y_test_seq = create_sequences(X_test, y_test_10class, SEQUENCE_LENGTH)
