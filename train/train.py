@@ -181,7 +181,9 @@ def run_training(
         train_preds, train_labels = [], []
         start_time = time.time()
 
-        for batch_x, batch_y in train_loader:
+        batch_pbar = tqdm(train_loader, desc=f"  🔄 训练 Epoch {epoch+1}", leave=False,
+                          unit="batch", ncols=100)
+        for batch_x, batch_y in batch_pbar:
             batch_x = batch_x.to(device, non_blocking=True)
             batch_y = batch_y.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
@@ -202,6 +204,8 @@ def run_training(
             train_loss += loss.item()
             train_preds.extend(outputs.argmax(dim=1).cpu().numpy())
             train_labels.extend(batch_y.cpu().numpy())
+            batch_pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+        batch_pbar.close()
 
         scheduler.step()  # CosineAnnealing 逐 epoch 更新
 
@@ -210,8 +214,10 @@ def run_training(
         val_loss = 0.0
         val_preds, val_labels = [], []
 
+        val_pbar = tqdm(val_loader, desc=f"  📊 验证 Epoch {epoch+1}", leave=False,
+                        unit="batch", ncols=100)
         with torch.no_grad():
-            for batch_x, batch_y in val_loader:
+            for batch_x, batch_y in val_pbar:
                 batch_x = batch_x.to(device, non_blocking=True)
                 batch_y = batch_y.to(device, non_blocking=True)
 
@@ -226,6 +232,8 @@ def run_training(
                 val_loss += loss.item()
                 val_preds.extend(outputs.argmax(dim=1).cpu().numpy())
                 val_labels.extend(batch_y.cpu().numpy())
+                val_pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+        val_pbar.close()
 
         epoch_time = time.time() - start_time
 
