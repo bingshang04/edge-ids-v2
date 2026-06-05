@@ -1,378 +1,295 @@
 """
-UNSW-NB15 数据预处理管道
+UNSW-NB15 数据预处理管道 (v2 重构)
 
-数据来源:
-  1. Kaggle: kagglehub.dataset_download('mrwellsdavid/unsw-nb15')
-  2. 手动下载 CSV 放入 data/raw/UNSW-NB15/
+改进:
+  - 48 维特征 (39数值 + 6衍生 + 3类别编码)
+  - 保存原始记录（不在此处做滑动窗口，由训练脚本处理）
+  - 合并特征工程 + 标准化 + 标签构建
 
-处理流程:
-  CSV → 清洗 → 编码 → 标准化 → 序列构建 → .npy
+数据流程:
+  CSV → 清洗 → 衍生特征 → 类别编码 → StandardScaler → .npy + .joblib
 
 用法:
-  python data/preprocess.py                          # 自动查找数据
+  python data/preprocess.py
   python data/preprocess.py --data-dir ./data/raw/UNSW-NB15/
-  python data/preprocess.py --window 100 --stride 1  # 序列参数
 """
 
 import os
 import sys
-import shutil
 import argparse
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
-from tqdm import tqdm
+import joblib
 
 
-# UNSW-NB15 攻击类别映射
-ATTACK_CATEGORIES = {
-    "Normal": 0,
-    "Fuzzers": 1,
-    "Analysis": 2,
-    "Backdoor": 3,
-    "DoS": 4,
-    "Exploits": 5,
-    "Generic": 6,
-    "Reconnaissance": 7,
-    "Shellcode": 8,
-    "Worms": 9,
-}
-NUM_CLASSES = len(ATTACK_CATEGORIES)
+# ============================================================
+# 配置常量
+# ============================================================
+
+# 10 类 (保留 DoS / Exploits 独立，不合并)
+CATEGORY_ORDER = [
+    "Normal", "Fuzzers", "Analysis", "Backdoor",
+    "DoS", "Exploits", "Generic", "Reconnaissance",
+    "Shellcode", "Worms",
+]
+
+ATTACK_CAT_MAP = {cat: i for i, cat in enumerate(CATEGORY_ORDER)}
+NUM_CLASSES = len(CATEGORY_ORDER)
 
 # 需要编码的类别特征
-CATEGORICAL_COLS = ["proto", "service", "state"]
+CAT_COLS = ["proto", "service", "state"]
 
-# 需要删除的非特征列
-DROP_COLS = ["id", "srcip", "dstip", "attack_cat", "label"]
+# 需要映射到数值的列
+NUMERIC_COLS = [
+    "dur", "proto", "service", "state", "spkts", "dpkts", "sbytes", "dbytes",
+    "rate", "sttl", "dttl", "sload", "dload", "sloss", "dloss", "sinpkt",
+    "dinpkt", "sjit", "djit", "swin", "stcpb", "dtcpb", "dwin", "tcprtt",
+    "synack", "ackdat", "smean", "dmean", "trans_depth", "response_body_len",
+    "ct_srv_src", "ct_state_ttl", "ct_dst_ltm", "ct_src_dport_ltm",
+    "ct_dst_sport_ltm", "ct_dst_src_ltm", "is_ftp_login", "ct_ftp_cmd",
+    "ct_flw_http_mthd", "ct_src_ltm", "ct_srv_dst", "is_sm_ips_ports",
+]
 
 
-def find_data(data_dir: str) -> tuple[str | None, str | None]:
-    """自动查找 UNSW-NB15 CSV 文件"""
+def load_csv_data(data_dir: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """加载训练集和测试集 CSV"""
     data_path = Path(data_dir)
+    train_files = list(data_path.glob("*training*.csv"))
+    test_files = list(data_path.glob("*testing*.csv"))
 
-    train_file = None
-    test_file = None
+    if not train_files:
+        # 尝试 Kaggle 缓存
+        kaggle_dir = Path.home() / ".cache" / "kagglehub" / "datasets" / "mrwellsdavid" / "unsw-nb15"
+        if kaggle_dir.exists():
+            for vdir in kaggle_dir.iterdir():
+                train_files.extend(vdir.glob("*training*.csv"))
+                test_files.extend(vdir.glob("*testing*.csv"))
 
-    # 搜索模式
-    train_patterns = ["UNSW_NB15_training-set.csv", "UNSW_NB15_training-set.csv"]
-    test_patterns = ["UNSW_NB15_testing-set.csv", "UNSW_NB15_testing-set.csv"]
+    if not train_files:
+        raise FileNotFoundError(
+            f"未找到 UNSW-NB15 CSV 文件。请下载后放入 {data_dir}\n"
+            f"或使用 Kaggle 命令: kagglehub.dataset_download('mrwellsdavid/unsw-nb15')"
+        )
 
-    for f in data_path.rglob("*.csv"):
-        fname = f.name
-        if "training" in fname.lower():
-            train_file = str(f)
-        elif "testing" in fname.lower():
-            test_file = str(f)
+    train_path = str(train_files[0])
+    test_path = str(test_files[0]) if test_files else None
 
-    # 尝试 Kaggle 缓存
-    if train_file is None:
-        kaggle_cache = Path.home() / ".cache" / "kagglehub" / "datasets" / "mrwellsdavid" / "unsw-nb15"
-        if kaggle_cache.exists():
-            for vdir in kaggle_cache.iterdir():
-                for f in vdir.glob("*.csv"):
-                    if "training" in f.name.lower():
-                        train_file = str(f)
-                    elif "testing" in f.name.lower():
-                        test_file = str(f)
-
-    return train_file, test_file
-
-
-def load_data(train_path: str, test_path: str | None) -> pd.DataFrame:
-    """加载并合并训练集和测试集"""
     print(f"📂 加载训练集: {train_path}")
     train_df = pd.read_csv(train_path)
     print(f"   训练集: {train_df.shape}")
 
-    if test_path and os.path.exists(test_path):
+    if test_path:
         print(f"📂 加载测试集: {test_path}")
         test_df = pd.read_csv(test_path)
         print(f"   测试集: {test_df.shape}")
-        df = pd.concat([train_df, test_df], ignore_index=True)
     else:
-        df = train_df
+        test_df = pd.DataFrame()
+
+    return train_df, test_df
+
+
+def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
+    """添加 6 个衍生特征 (来自 edge_ids_v2 的经验)"""
+    df = df.copy()
+
+    # 流量比例
+    df["byte_ratio"] = df["sbytes"] / (df["dbytes"] + 1e-6)
+    df["load_ratio"] = df["sload"] / (df["dload"] + 1e-6)
+    df["pkt_ratio"] = df["spkts"] / (df["spkts"] + df["dpkts"] + 1e-6)
+
+    # 交互特征
+    df["dur_rate"] = df["dur"] * df["rate"]
+    df["ttl_diff"] = df["sttl"] - df["dttl"]
+
+    # 包大小
+    df["avg_pkt_size"] = (df["sbytes"] + df["dbytes"]) / (df["spkts"] + df["dpkts"] + 1e-6)
 
     return df
-
-
-def clean_data(df: pd.DataFrame) -> pd.DataFrame:
-    """数据清洗"""
-    n_before = len(df)
-
-    # 替换无穷大
-    df = df.replace([np.inf, -np.inf], np.nan)
-
-    # 删除 NaN 行 (论文2做法)
-    df = df.dropna()
-    n_after_nan = len(df)
-
-    # 删除全零列
-    zero_cols = [c for c in df.columns if (df[c] == 0).all() and c not in DROP_COLS]
-    if zero_cols:
-        print(f"  删除全零列: {zero_cols}")
-        df = df.drop(columns=zero_cols)
-
-    print(f"  清洗: {n_before} → {n_after_nan} (删除 {n_before - n_after_nan} 行)")
-    return df
-
-
-def extract_labels(df: pd.DataFrame) -> tuple[pd.DataFrame, np.ndarray]:
-    """提取攻击类别标签"""
-    if "attack_cat" in df.columns:
-        labels = df["attack_cat"].map(ATTACK_CATEGORIES)
-        labels = labels.fillna(0).astype(np.int64).values  # 未知→Normal
-    elif "label" in df.columns:
-        # 只有二分类标签的情况
-        labels = df["label"].values.astype(np.int64)
-    else:
-        labels = np.zeros(len(df), dtype=np.int64)
-
-    return df, labels
 
 
 def encode_and_normalize(
-    df: pd.DataFrame,
-    labels: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, StandardScaler, int]:
-    """特征编码 + Z-Score标准化"""
-    # 删除不需要的列
-    drop_cols = [c for c in DROP_COLS if c in df.columns]
-    df = df.drop(columns=drop_cols, errors="ignore")
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+) -> dict:
+    """类别编码 + Z-Score 标准化 + 标签构建"""
 
-    # Label Encoding 类别特征
-    for col in CATEGORICAL_COLS:
-        if col in df.columns and df[col].dtype == "object":
-            le = LabelEncoder()
-            df[col] = le.fit_transform(df[col].astype(str))
+    # --- 衍生特征 ---
+    train_df = add_derived_features(train_df)
+    if len(test_df) > 0:
+        test_df = add_derived_features(test_df)
 
-    # 只保留数值列
-    numeric_df = df.select_dtypes(include=[np.number])
-    num_features = numeric_df.shape[1]
-    print(f"  特征维度: {num_features}")
+    # --- 类别特征编码 ---
+    label_encoders = {}
+    for col in CAT_COLS:
+        combined = pd.concat(
+            [train_df[col], test_df[col]] if len(test_df) > 0 else [train_df[col]],
+            axis=0,
+        ).fillna("unknown").astype(str)
+        le = LabelEncoder()
+        le.fit(combined)
+        train_df[col] = le.transform(train_df[col].fillna("unknown").astype(str))
+        if len(test_df) > 0:
+            test_df[col] = le.transform(test_df[col].fillna("unknown").astype(str))
+        label_encoders[col] = le
+        print(f"  编码列 {col}: {len(le.classes_)} 类")
 
-    # Z-Score 标准化
+    # --- 特征列构建 ---
+    derived_cols = ["byte_ratio", "load_ratio", "pkt_ratio",
+                    "dur_rate", "ttl_diff", "avg_pkt_size"]
+    # 实际存在的数值列
+    available_numeric = [c for c in NUMERIC_COLS if c in train_df.columns]
+    feature_cols = available_numeric + derived_cols + CAT_COLS
+    # 去重保持顺序
+    seen = set()
+    feature_cols = [c for c in feature_cols if not (c in seen or seen.add(c))]
+    print(f"  特征维度: {len(feature_cols)}")
+
+    # --- 缺失值填充 ---
+    for col in feature_cols:
+        if col in train_df.columns:
+            train_df[col] = train_df[col].fillna(0)
+            if len(test_df) > 0 and col in test_df.columns:
+                test_df[col] = test_df[col].fillna(0)
+
+    # --- Z-Score 标准化 ---
     scaler = StandardScaler()
-    data = scaler.fit_transform(numeric_df.values).astype(np.float32)
+    X_train = scaler.fit_transform(train_df[feature_cols].values).astype(np.float32)
+    if len(test_df) > 0:
+        X_test = scaler.transform(test_df[feature_cols].values).astype(np.float32)
+    else:
+        X_test = np.array([])
 
-    return data, labels, scaler, num_features
-
-
-def build_sequences(
-    data: np.ndarray,
-    labels: np.ndarray,
-    window_size: int = 100,
-    stride: int = 1,
-) -> tuple[np.ndarray, np.ndarray]:
-    """滑动窗口构建序列"""
-    n = len(data)
-    sequences, seq_labels = [], []
-
-    # 确定步数
-    indices = list(range(0, n - window_size + 1, stride))
-    print(f"  构建序列: {len(indices)} 个窗口 (窗口={window_size}, 步长={stride})")
-
-    for start in tqdm(indices, desc="  📐 序列构建", unit="seq"):
-        end = start + window_size
-        seq = data[start:end]
-        seq_lbls = labels[start:end]
-
-        # 窗口标签: 任一异常 → 该攻击类型
-        attack_mask = seq_lbls > 0
-        if np.any(attack_mask):
-            seq_label = seq_lbls[attack_mask][0]
+    # --- 标签构建 ---
+    # 10 类标签
+    cat_to_id = {cat: i for i, cat in enumerate(CATEGORY_ORDER)}
+    if "attack_cat" in train_df.columns:
+        y_train_10class = (
+            train_df["attack_cat"]
+            .fillna("Normal")
+            .astype(str)
+            .map(cat_to_id)
+            .fillna(0)
+            .astype(np.int64)
+            .values
+        )
+        if len(test_df) > 0:
+            y_test_10class = (
+                test_df["attack_cat"]
+                .fillna("Normal")
+                .astype(str)
+                .map(cat_to_id)
+                .fillna(0)
+                .astype(np.int64)
+                .values
+            )
         else:
-            seq_label = 0
+            y_test_10class = np.array([])
+    else:
+        y_train_10class = np.zeros(len(train_df), dtype=np.int64)
+        y_test_10class = np.zeros(len(test_df), dtype=np.int64) if len(test_df) > 0 else np.array([])
 
-        sequences.append(seq)
-        seq_labels.append(seq_label)
+    # 二分类标签 (Normal=0, Attack=1)
+    y_train_binary = (y_train_10class != 0).astype(np.int64)
+    y_test_binary = (y_test_10class != 0).astype(np.int64) if len(y_test_10class) > 0 else np.array([])
 
-    return np.array(sequences, dtype=np.float32), np.array(seq_labels, dtype=np.int64)
-
-
-def generate_synthetic_data(
-    n_samples: int = 100000,
-    n_features: int = 42,
-    window_size: int = 100,
-    output_dir: str = "./data/processed/",
-    seed: int = 42,
-):
-    """
-    生成模拟 UNSW-NB15 特征的合成数据 (当无法获取真实数据时使用)
-
-    模拟 UNSW-NB15 的数据特征:
-      - 类别极度不平衡 (~87% 正常, ~13% 攻击)
-      - 攻击类别呈长尾分布
-      - 数值特征之间有一定的相关性
-    """
-    print("\n⚠️  未找到真实数据，生成模拟数据...")
-    print(f"   样本: {n_samples}, 特征: {n_features}, 窗口: {window_size}")
-    np.random.seed(seed)
-
-    # 模拟 UNSW-NB15 类别分布 (基于论文2 表2)
-    class_dist = {
-        0: 0.4787,   # Normal (约48%)
-        1: 0.0728,   # Fuzzers
-        2: 0.0054,   # Analysis
-        3: 0.0056,   # Backdoor
-        4: 0.0390,   # DoS
-        5: 0.0890,   # Exploits
-        6: 0.1200,   # Generic
-        7: 0.0716,   # Reconnaissance
-        8: 0.0034,   # Shellcode
-        9: 0.0028,   # Worms (极少)
-    }
-
-    # 为每个攻击类生成不同分布的特征
-    # 正常流量: 特征值集中在均值附近
-    # 攻击流量: 特征值有偏移
-    normal_data = np.random.randn(
-        int(n_samples * 0.7), n_features
-    ).astype(np.float32)
-
-    attack_data_list = [normal_data]
-    attack_labels_list = [np.zeros(len(normal_data), dtype=np.int64)]
-
-    for cls_id in range(1, NUM_CLASSES):
-        n_cls = max(100, int(n_samples * class_dist[cls_id]))
-        # 攻击类特征有偏移 (模拟真实攻击特征差异)
-        shift = np.random.randn(n_features) * 2.0
-        scale = np.random.uniform(0.5, 2.0, n_features)
-        cls_data = (np.random.randn(n_cls, n_features) * scale + shift).astype(np.float32)
-        attack_data_list.append(cls_data)
-        attack_labels_list.append(np.full(n_cls, cls_id, dtype=np.int64))
-
-    all_data = np.concatenate(attack_data_list)
-    all_labels = np.concatenate(attack_labels_list)
-
-    # 打乱
-    perm = np.random.permutation(len(all_data))
-    all_data = all_data[perm]
-    all_labels = all_labels[perm]
-
-    # 标准化
-    from sklearn.preprocessing import StandardScaler
-    scaler = StandardScaler()
-    all_data = scaler.fit_transform(all_data).astype(np.float32)
-
-    print(f"   总样本: {len(all_data)}, 类别分布:")
-    for cls_id in range(NUM_CLASSES):
-        count = (all_labels == cls_id).sum()
-        cls_name = list(ATTACK_CATEGORIES.keys())[cls_id]
-        print(f"     {cls_name}: {count} ({count/len(all_labels)*100:.1f}%)")
-
-    # 构建序列
-    X, y = build_sequences(all_data, all_labels, window_size, stride=10)
-
-    # 拆分
-    n = len(X)
-    X_train, X_temp, y_train, y_temp = train_test_split(
-        X, y, test_size=0.3, stratify=y, random_state=seed,
-    )
-    X_val, X_test, y_val, y_test = train_test_split(
-        X_temp, y_temp, test_size=0.5, stratify=y_temp, random_state=seed,
-    )
-
-    save_processed(X_train, y_train, X_val, y_val, X_test, y_test, output_dir)
+    label_encoders["attack_cat"] = CATEGORY_ORDER
 
     return {
-        "num_features": n_features,
-        "num_classes": NUM_CLASSES,
-        "train_samples": len(X_train),
-        "val_samples": len(X_val),
-        "test_samples": len(X_test),
-        "window_size": window_size,
-        "is_synthetic": True,
+        "X_train": X_train,
+        "X_test": X_test,
+        "y_train_10class": y_train_10class,
+        "y_test_10class": y_test_10class,
+        "y_train_binary": y_train_binary,
+        "y_test_binary": y_test_binary,
+        "n_features": len(feature_cols),
+        "label_encoders": label_encoders,
+        "scaler": scaler,
+        "feature_cols": feature_cols,
     }
-
-
-def save_processed(
-    X_train, y_train, X_val, y_val, X_test, y_test, output_dir: str,
-):
-    """保存处理后的数据"""
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    np.save(output_path / "X_train.npy", X_train)
-    np.save(output_path / "y_train.npy", y_train)
-    np.save(output_path / "X_val.npy", X_val)
-    np.save(output_path / "y_val.npy", y_val)
-    np.save(output_path / "X_test.npy", X_test)
-    np.save(output_path / "y_test.npy", y_test)
-
-    print(f"\n✅ 数据已保存: {output_path}")
-    print(f"   训练: X_train={X_train.shape}, y_train={y_train.shape}")
-    print(f"   验证: X_val={X_val.shape}, y_val={y_val.shape}")
-    print(f"   测试: X_test={X_test.shape}, y_test={y_test.shape}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="UNSW-NB15 数据预处理")
+    parser = argparse.ArgumentParser(description="UNSW-NB15 数据预处理 (v2)")
     parser.add_argument("--data-dir", default="./data/raw/UNSW-NB15/")
     parser.add_argument("--output-dir", default="./data/processed/")
-    parser.add_argument("--window", type=int, default=100)
-    parser.add_argument("--stride", type=int, default=1)
-    parser.add_argument("--test-size", type=float, default=0.2)
+    parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  Edge-IDS 数据预处理")
+    print("  Edge-IDS 数据预处理 (v2 重构)")
     print("=" * 60)
 
-    # 查找数据
-    train_path, test_path = find_data(args.data_dir)
+    # 加载原始数据
+    train_df, test_df = load_csv_data(args.data_dir)
 
-    if train_path is None:
-        # 生成合成数据
-        info = generate_synthetic_data(
-            n_samples=100000,
-            n_features=42,
-            window_size=args.window,
-            output_dir=args.output_dir,
-            seed=args.seed,
-        )
-    else:
-        # 加载真实数据
-        df = load_data(train_path, test_path)
-        df = clean_data(df)
-        df, labels = extract_labels(df)
+    # 编码 + 标准化
+    result = encode_and_normalize(train_df, test_df)
+    X_train_full = result["X_train"]
+    X_test = result["X_test"]
+    y_train_10class = result["y_train_10class"]
+    y_test_10class = result["y_test_10class"]
+    y_train_binary = result["y_train_binary"]
+    y_test_binary = result["y_test_binary"]
+    n_features = result["n_features"]
+    label_encoders = result["label_encoders"]
+    scaler = result["scaler"]
 
-        print(f"\n  类别分布:")
-        for cls_name, cls_id in sorted(ATTACK_CATEGORIES.items(), key=lambda x: x[1]):
-            count = (labels == cls_id).sum()
-            if count > 0:
-                print(f"    {cls_name}: {count} ({count/len(labels)*100:.2f}%)")
+    # 类别分布
+    print(f"\n  10分类训练集分布:")
+    class_counts = np.bincount(y_train_10class, minlength=NUM_CLASSES)
+    for i, cat in enumerate(CATEGORY_ORDER):
+        if class_counts[i] > 0:
+            print(f"    {cat}: {class_counts[i]} ({class_counts[i]/len(y_train_10class)*100:.1f}%)")
 
-        # 编码 + 标准化
-        data, labels, scaler, n_features = encode_and_normalize(df, labels)
+    print(f"\n  二分类训练集: Normal={int((y_train_binary==0).sum())}, "
+          f"Attack={int((y_train_binary==1).sum())}")
 
-        # 构建序列
-        X, y = build_sequences(data, labels, args.window, args.stride)
+    # 拆分验证集
+    (X_train, X_val,
+     y_train_10class, y_val_10class,
+     y_train_binary, y_val_binary) = train_test_split(
+        X_train_full, y_train_10class, y_train_binary,
+        test_size=args.val_ratio,
+        stratify=y_train_10class,
+        random_state=args.seed,
+    )
 
-        # 拆分: 训练/验证/测试
-        X_temp, X_test, y_temp, y_test = train_test_split(
-            X, y, test_size=args.test_size, stratify=y, random_state=args.seed,
-        )
-        X_train, X_val, y_train, y_val = train_test_split(
-            X_temp, y_temp, test_size=args.test_size, stratify=y_temp, random_state=args.seed,
-        )
+    print(f"\n  拆分后:")
+    print(f"    训练集: {X_train.shape[0]:,} 条记录")
+    print(f"    验证集: {X_val.shape[0]:,} 条记录")
+    if len(X_test) > 0:
+        print(f"    测试集: {X_test.shape[0]:,} 条记录")
 
-        save_processed(X_train, y_train, X_val, y_val, X_test, y_test, args.output_dir)
+    # 保存
+    output_path = Path(args.output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
 
-        info = {
-            "num_features": n_features,
-            "num_classes": NUM_CLASSES,
-            "train_samples": len(X_train),
-            "val_samples": len(X_val),
-            "test_samples": len(X_test),
-            "window_size": args.window,
-            "is_synthetic": False,
-        }
+    np.save(output_path / "X_train.npy", X_train)
+    np.save(output_path / "y_train_10class.npy", y_train_10class)
+    np.save(output_path / "y_train_binary.npy", y_train_binary)
+    np.save(output_path / "X_val.npy", X_val)
+    np.save(output_path / "y_val_10class.npy", y_val_10class)
+    np.save(output_path / "y_val_binary.npy", y_val_binary)
 
-    print(f"\n📊 数据信息: {info}")
+    if len(X_test) > 0:
+        np.save(output_path / "X_test.npy", X_test)
+        np.save(output_path / "y_test_10class.npy", y_test_10class)
+        np.save(output_path / "y_test_binary.npy", y_test_binary)
+
+    # 保存 Scaler + Encoder
+    joblib.dump(scaler, output_path / "scaler.joblib")
+    for col, le in label_encoders.items():
+        joblib.dump(le, output_path / f"le_{col}.joblib")
+
+    print(f"\n✅ 数据已保存: {output_path}")
+    print(f"  特征维度: {n_features}")
+    print(f"  类别数: {NUM_CLASSES}")
+    print(f"  类别顺序: {CATEGORY_ORDER}")
     print("✅ 预处理完成！运行训练：python train/train.py")
 
 
